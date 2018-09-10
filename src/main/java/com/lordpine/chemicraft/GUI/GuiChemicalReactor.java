@@ -140,7 +140,7 @@ public class GuiChemicalReactor extends GuiContainer{
             frac = 29;
         this.drawTexturedModalRect(xSize+var5+5, ySize+var6-84-correction, 0, 0, (int)frac, 4);
 
-        frac = (int)(te.getTorque()*29L)/te.MIN_TORQUE;
+        frac = (int)(te.getTorque()*29L)/te.min_torque;
         if (frac > 29)
             frac = 29;
         this.drawTexturedModalRect(xSize+var5+5, ySize+var6-24-correction, 0, 0, (int)frac, 4);

@@ -1,21 +1,33 @@
 package com.lordpine.chemicraft.TileEntities;
 
+import Reika.DragonAPI.ASM.APIStripper;
 import Reika.DragonAPI.Base.TileEntityBase;
 import Reika.DragonAPI.Instantiable.HybridTank;
 import Reika.DragonAPI.Instantiable.StepTimer;
+import Reika.DragonAPI.Libraries.MathSci.ReikaMathLibrary;
 import Reika.DragonAPI.Libraries.World.ReikaWorldHelper;
 import Reika.RotaryCraft.API.Power.ShaftPowerReceiver;
 import Reika.RotaryCraft.Auxiliary.Interfaces.FrictionHeatable;
 import Reika.RotaryCraft.Auxiliary.Interfaces.TemperatureTE;
 import Reika.RotaryCraft.Auxiliary.RotaryAux;
+import Reika.RotaryCraft.TileEntities.Auxiliary.TileEntityFurnaceHeater;
 import com.lordpine.chemicraft.Blocks.ModBlocks;
-import com.lordpine.chemicraft.Fluids.ModFluids;
 import com.lordpine.chemicraft.Recipes.ChemicalReactorRecipe;
 import com.lordpine.chemicraft.Recipes.RecipesChemicalReactor;
+import mcp.mobius.waila.api.IWailaConfigHandler;
+import mcp.mobius.waila.api.IWailaDataAccessor;
+import mcp.mobius.waila.api.IWailaDataProvider;
 import net.minecraft.block.Block;
+import net.minecraft.entity.EntityLivingBase;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.init.Blocks;
+import net.minecraft.inventory.IInventory;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.tileentity.TileEntity;
+import net.minecraft.util.AxisAlignedBB;
 import net.minecraft.world.World;
 import net.minecraftforge.common.util.ForgeDirection;
 import net.minecraftforge.fluids.Fluid;
@@ -23,22 +35,29 @@ import net.minecraftforge.fluids.FluidStack;
 import net.minecraftforge.fluids.FluidTankInfo;
 import net.minecraftforge.fluids.IFluidHandler;
 
-import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
-public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPowerReceiver, IFluidHandler, TemperatureTE, FrictionHeatable {
+@APIStripper.Strippable(value = {"mcp.mobius.waila.api.IWailaDataProvider"})
+public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPowerReceiver, IFluidHandler, TemperatureTE, FrictionHeatable, IWailaDataProvider, IInventory {
 
     public int iotick = 512;
 
-    public int MIN_TORQUE = 1024;
+    public int min_torque = 1;
     public long MIN_POWER = 1024;
     public long MIN_SPEED = 1;
-    public int MAX_TEMP = 2000;
     private int torque;
     private int omega;
     private long power;
-    private int temperature;
+    private float temperature;
+    private static Set<Item> catalysts = new HashSet<>();
+
+    public int getProgressTime() {
+        return progressTime;
+    }
+
+    private int progressTime;
 
     private static Set<Fluid> valid_fluids = new HashSet<>();
 
@@ -52,14 +71,15 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
         super();
         input_tanks[0] = new HybridTank("input_1", 32000);
         input_tanks[1] = new HybridTank("input_2", 32000);
-        this.power = 0;
-        this.torque = 0;
-        this.omega = 0;
-        this.temperature = 1000;
+        temperature = 30;
     }
 
     public static void addValidFluid(Fluid fluid) {
         valid_fluids.add(fluid);
+    }
+
+    public static void addValidCatalyst(Item item) {
+        catalysts.add(item);
     }
 
     public HybridTank[] getInput_tanks() {
@@ -84,20 +104,47 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
         if (tempTimer.checkCap()) {
             this.updateTemperature(world, x, y, z, meta);
         }
-        ChemicalReactorRecipe r = RecipesChemicalReactor.instance.getRecipe(this.getInput_tanks()[0].getFluid(), this.getInput_tanks()[1].getFluid(), this.temperature, null);
-        if (r != null) {
-            if (output_tank.fill(r.output, false) == r.output.amount) {
-                output_tank.fill(r.output, true);
-                if (input_tanks[0].getActualFluid() == r.input1.getFluid()) {
-                    input_tanks[0].drain(r.input1.amount, true);
-                    input_tanks[1].drain(r.input2.amount, true);
-                } else {
-                    input_tanks[1].drain(r.input1.amount, true);
-                    input_tanks[0].drain(r.input2.amount, true);
-                }
-            }
+        if (power >= MIN_POWER && omega >= MIN_SPEED) {
+           this.doOperation();
+        }
+        else {
+            progressTime = 0;
+            min_torque = 1;
         }
 
+    }
+
+    private void doOperation() {
+        ChemicalReactorRecipe r = RecipesChemicalReactor.instance.getRecipe(this.getInput_tanks()[0].getFluid(), this.getInput_tanks()[1].getFluid(), (int)this.temperature, null);
+        if (r != null) {
+            min_torque = r.required_torque;
+            if (torque >= min_torque) {
+                progressTime++;
+                if (progressTime >= this.getOperationTime()) {
+                    if (output_tank.fill(r.output, false) == r.output.amount) {
+                        output_tank.fill(r.output, true);
+                        if (input_tanks[0].getActualFluid() == r.input1.getFluid()) {
+                            input_tanks[0].drain(r.input1.amount, true);
+                            input_tanks[1].drain(r.input2.amount, true);
+                        } else {
+                            input_tanks[1].drain(r.input1.amount, true);
+                            input_tanks[0].drain(r.input2.amount, true);
+                        }
+                        progressTime = 0;
+                    }else{
+                        progressTime--;
+                    }
+                }
+            }
+        } else {
+            progressTime = 0;
+            min_torque = 1;
+        }
+    }
+
+    private int getOperationTime() {
+        int val = (int)(Math.exp(-temperature/500)*(700 - 38.5 * ReikaMathLibrary.logbase2(this.omega + 1)));
+        return val > 0 ? val : 1;
     }
 
     @Override
@@ -112,7 +159,80 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
 
     public boolean isUseableByPlayer(EntityPlayer player)
     {
-        return worldObj.getTileEntity(xCoord, yCoord, zCoord) != this ? false : player.getDistanceSq((double)xCoord + 0.5D, (double)yCoord + 0.5D, (double)zCoord + 0.5D) <= 64.0D;
+        return worldObj.getTileEntity(xCoord, yCoord, zCoord) == this && player.getDistanceSq((double) xCoord + 0.5D, (double) yCoord + 0.5D, (double) zCoord + 0.5D) <= 64.0D;
+    }
+
+    @Override
+    public void openInventory() {
+
+    }
+
+    @Override
+    public void closeInventory() {
+
+    }
+
+    /**
+     * Returns true if automation is allowed to insert the given stack (ignoring stack size) into the given slot.
+     *
+     * @param p_94041_1_
+     * @param p_94041_2_
+     */
+    @Override
+    public boolean isItemValidForSlot(int p_94041_1_, ItemStack p_94041_2_) {
+        return false;
+    }
+
+    /**
+     * Returns the number of slots in the inventory.
+     */
+    @Override
+    public int getSizeInventory() {
+        return 1;
+    }
+
+    /**
+     * Returns the stack in slot i
+     *
+     * @param p_70301_1_
+     */
+    @Override
+    public ItemStack getStackInSlot(int p_70301_1_) {
+        return null;
+    }
+
+    /**
+     * Removes from an inventory slot (first arg) up to a specified number (second arg) of items and returns them in a
+     * new stack.
+     *
+     * @param p_70298_1_
+     * @param p_70298_2_
+     */
+    @Override
+    public ItemStack decrStackSize(int p_70298_1_, int p_70298_2_) {
+        return null;
+    }
+
+    /**
+     * When some containers are closed they call this on each slot, then drop whatever it returns as an EntityItem -
+     * like when you close a workbench GUI.
+     *
+     * @param p_70304_1_
+     */
+    @Override
+    public ItemStack getStackInSlotOnClosing(int p_70304_1_) {
+        return null;
+    }
+
+    /**
+     * Sets the given item stack to the specified slot in the inventory (can be crafting or armor sections).
+     *
+     * @param p_70299_1_
+     * @param p_70299_2_
+     */
+    @Override
+    public void setInventorySlotContents(int p_70299_1_, ItemStack p_70299_2_) {
+
     }
 
     public String getInventoryName()
@@ -120,6 +240,21 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
         return "machine.chemical_reactor";
     }
 
+    /**
+     * Returns if the inventory is named
+     */
+    @Override
+    public boolean hasCustomInventoryName() {
+        return false;
+    }
+
+    /**
+     * Returns the maximum stack size for a inventory slot.
+     */
+    @Override
+    public int getInventoryStackLimit() {
+        return 0;
+    }
 
 
     /**
@@ -308,7 +443,7 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
      */
     @Override
     public int getMinTorque(int available) {
-        return MIN_TORQUE;
+        return min_torque;
     }
 
     /**
@@ -365,7 +500,8 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
         NBT.setInteger("omega", omega);
         NBT.setLong("power", power);
         NBT.setInteger("io", iotick);
-        NBT.setInteger("temperature", temperature);
+        NBT.setFloat("temperature", temperature);
+        NBT.setInteger("processtime", progressTime);
         this.input_tanks[0].writeToNBT(NBT);
         this.input_tanks[1].writeToNBT(NBT);
         this.output_tank.writeToNBT(NBT);
@@ -379,6 +515,8 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
         omega = NBT.getInteger("omega");
         power = NBT.getLong("power");
         iotick = NBT.getInteger("io");
+        temperature = NBT.getFloat("temperature");
+        progressTime = NBT.getInteger("processtime");
 
         if (torque < 0 || torque == Double.POSITIVE_INFINITY || torque == Double.NaN)
             torque = 0;
@@ -400,7 +538,7 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
      */
     @Override
     public void onOverheat(World world, int x, int y, int z) {
-
+        overheat(world, x, y, z);
     }
 
     /**
@@ -420,7 +558,7 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
      */
     @Override
     public float getMultiplier() {
-        return 0;
+        return 0.25f;
     }
 
     /**
@@ -428,43 +566,45 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
      */
     @Override
     public void resetAmbientTemperatureTimer() {
-        tempTimer.reset();
+        //tempTimer.reset();
     }
 
     @Override
     public void updateTemperature(World world, int x, int y, int z, int meta) {
-        int Tamb = ReikaWorldHelper.getAmbientTemperatureAt(world, x, y, z);
+        ForgeDirection frictionheaterside = ReikaWorldHelper.checkForAdjTile(world, x, y, z, TileEntityFurnaceHeater.class, true);
+        int Tamb = 0;
+        if (frictionheaterside == null) {
+            Tamb = ReikaWorldHelper.getAmbientTemperatureAt(world, x, y, z);
 
-        if (RotaryAux.isNextToWater(world, x, y, z)) {
-            Tamb /= 2;
-        }
-        ForgeDirection iceside = ReikaWorldHelper.checkForAdjBlock(world, x, y, z, Blocks.ice);
-        if (iceside == null)
-            iceside = ReikaWorldHelper.checkForAdjBlock(world, x, y, z, Blocks.packed_ice);
-        if (iceside != null) {
-            if (Tamb > 0)
-                Tamb /= 4;
-            ReikaWorldHelper.changeAdjBlock(world, x, y, z, iceside, Blocks.flowing_water, 0);
-        }
-        int Tadd = 0;
-        if (RotaryAux.isNextToFire(world, x, y, z)) {
-            Tadd += Tamb >= 100 ? 100 : 200;
-        }
-        if (RotaryAux.isNextToLava(world, x, y, z)) {
-            Tadd += Tamb >= 100 ? 400 : 600;
-        }
-        Tamb += Tadd;
+            if (RotaryAux.isNextToWater(world, x, y, z)) {
+                Tamb /= 2;
+            }
+            ForgeDirection iceside = ReikaWorldHelper.checkForAdjBlock(world, x, y, z, Blocks.ice);
+            if (iceside == null)
+                iceside = ReikaWorldHelper.checkForAdjBlock(world, x, y, z, Blocks.packed_ice);
+            if (iceside != null) {
+                if (Tamb > 0)
+                    Tamb /= 4;
+                ReikaWorldHelper.changeAdjBlock(world, x, y, z, iceside, Blocks.flowing_water, 0);
+            }
+            int Tadd = 0;
+            if (RotaryAux.isNextToFire(world, x, y, z)) {
+                Tadd += Tamb >= 100 ? 100 : 200;
+            }
+            if (RotaryAux.isNextToLava(world, x, y, z)) {
+                Tadd += Tamb >= 100 ? 400 : 600;
+            }
+            Tamb += Tadd;
 
-        if (temperature > Tamb)
-            temperature--;
-        if (temperature > Tamb*2)
-            temperature--;
-        if (temperature < Tamb)
-            temperature++;
-        if (temperature*2 < Tamb)
-            temperature++;
-        if (temperature > MAX_TEMP)
-            temperature = MAX_TEMP;
+            } else {
+                int dx = x+frictionheaterside.offsetX;
+                int dy = y+frictionheaterside.offsetY;
+                int dz = z+frictionheaterside.offsetZ;
+                TileEntityFurnaceHeater te = (TileEntityFurnaceHeater)world.getTileEntity(dx, dy, dz);
+                Tamb = te.getTemperature();
+        }
+
+        temperature -= (temperature - Tamb) / 10;
         if (temperature > 100) {
             ForgeDirection side = ReikaWorldHelper.checkForAdjBlock(world, x, y, z, Blocks.snow);
             if (side == null)
@@ -475,11 +615,18 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
             if (side != null)
                 ReikaWorldHelper.changeAdjBlock(world, x, y, z, side, Blocks.flowing_water, 0);
         }
-    }
+        ChemicalReactorRecipe r = RecipesChemicalReactor.instance.getRecipe(this.getInput_tanks()[0].getFluid(), this.getInput_tanks()[1].getFluid(), (int)this.temperature, null);
+        if (r != null) {
+            min_torque = r.required_torque;
+            if (torque >= min_torque) {
+                temperature += r.temperature_released;
+            }
+        }
+        }
 
     @Override
     public void addTemperature(int temp) {
-        temperature += temp;
+        //temperature += temp;
     }
 
     @Override
@@ -489,12 +636,16 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
 
     @Override
     public void overheat(World world, int x, int y, int z) {
-
+        List<EntityLivingBase> entitylist = world.getEntitiesWithinAABB(EntityLivingBase.class, AxisAlignedBB.getBoundingBox(x - 2,y - 2,z - 2, x + 2,  y + 2,  z + 2));
+        for (EntityLivingBase entity : entitylist) {
+            entity.setFire(10);
+        }
+        world.createExplosion(null,x + 0.5d, y + 0.5d, z + 0.5d, 2.0f, true);
     }
 
     @Override
     public boolean canBeCooledWithFins() {
-        return false;
+        return true;
     }
 
     @Override
@@ -504,7 +655,7 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
 
     @Override
     public int getTemperature() {
-        return temperature;
+        return (int)temperature;
     }
 
     /**
@@ -512,7 +663,7 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
      */
     @Override
     public int getMaxTemperature() {
-        return 2000;
+        return 1000;
     }
 
     @Override
@@ -530,5 +681,34 @@ public class TileEntityChemicalReactor extends TileEntityBase implements ShaftPo
 
     private ForgeDirection getRight(ForgeDirection dir) {
         return dir.getRotation(ForgeDirection.DOWN);
+    }
+
+
+    @Override
+    public ItemStack getWailaStack(IWailaDataAccessor accessor, IWailaConfigHandler config) {
+        return null;
+    }
+
+
+    @Override
+    public List<String> getWailaHead(ItemStack itemStack, List<String> currenttip, IWailaDataAccessor accessor, IWailaConfigHandler config) {
+        return currenttip;
+    }
+
+
+    @Override
+    public List<String> getWailaBody(ItemStack itemStack, List<String> currenttip, IWailaDataAccessor accessor, IWailaConfigHandler config) {
+        currenttip.add(String.format("Temperature: %dC", this.getTemperature()));
+        return currenttip;
+    }
+
+    @Override
+    public List<String> getWailaTail(ItemStack itemStack, List<String> currenttip, IWailaDataAccessor accessor, IWailaConfigHandler config) {
+        return currenttip;
+    }
+
+    @Override
+    public NBTTagCompound getNBTData(EntityPlayerMP player, TileEntity te, NBTTagCompound tag, World world, int x, int y, int z) {
+        return tag;
     }
 }
